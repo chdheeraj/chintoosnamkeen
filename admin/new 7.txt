@@ -1,0 +1,109 @@
+public function searchDocumentsForReact($criteria) {
+		if ($criteria->Role == 'user') {
+			$condition = 'p.user_id = :user_id OR p.email_address=:email';
+			$sqlCondition = 'p.user_id = :user_id';
+		} else {
+			$condition = 'p.user_id IN (SELECT user_id FROM user_subscription WHERE company_id = :company_id) OR p.email_address=:email';
+			$sqlCondition = 'p.user_id IN (SELECT user_id FROM user_subscription WHERE company_id = :company_id)';
+		}
+		$dmCondition = 'p.status_id != 3';
+		$offset = $criteria->PageSize * ($criteria->PageNumber-1);
+		
+       	$dataSql =
+	       "SELECT SQL_CALC_FOUND_ROWS DISTINCT d.ad_document_id AS ADocumentId,p.user_id as UserId,p.ad_party_id as PartyId,p.status_id as DMstatus, d.template_id AS TemplateId,
+				   d.title AS Title, d.description AS Description, d.party_count AS TotalRecipients, 
+				   d.original_filename AS OriginalFileName, d.filename AS FileName, d.width AS Width, d.height AS Height,
+				   d.status_id AS StatusId, s.code AS StatusCode, u.first_name AS OwnerFirstName, u.last_name AS OwnerLastName,
+				   p.user_id AS UserId, d.created_date AS CreatedOn, IF (p.is_signatory = 1, 'Sign','Approve') AS RecipientStatus,
+				   (SELECT GROUP_CONCAT(concat(p.first_name,' ',p.last_name)) 
+				      FROM ad_party p 
+				     WHERE p.ad_document_id = d.ad_document_id
+				       AND p.is_owner != 1) AS RecipientNames,
+				   (SELECT IF (p.user_id = :user_id, 'You', concat(IFNULL(u.first_name,p.first_name),' ',IFNULL(u.last_name,p.last_name)))
+				      FROM ad_party p
+				     WHERE p.ad_document_id = d.ad_document_id
+				       AND p.is_owner = 1 LIMIT 1) AS OwnedBy,
+				       p.is_owner AS IsOwner,
+				       ps.ad_document_status_id AS ViewerStatusId, ps.code AS ViewerStatusCode, ps.name AS ViewerStatusName,
+				       d.is_parallel_signing AS IsParallelSigning,
+				   (SELECT p.position
+				      FROM ad_party p
+				     WHERE p.ad_document_id = d.ad_document_id
+				       AND p.is_owner = 1 LIMIT 1) AS Position,
+				   (SELECT IF(COUNT(1)> 0, 1, 0) FROM sat_cloud_storage_list sl 
+				    INNER JOIN sat_doc_source_google sg ON sg.document_type = sl.code 
+				    AND sl.code = 'googledrive' AND is_active = 1
+				    WHERE sg.user_id = :user_id) AS IsGoogleDriveEnabled,
+				   (SELECT IF(COUNT(1)> 0, 1, 0) 
+				     FROM sat_cloud_storage_list sl 
+				    	  INNER JOIN sat_doc_source_onedrive od ON od.document_type = sl.code 
+				      AND sl.code = 'onedrive' AND is_active = 1
+				    WHERE od.user_id = :user_id) AS IsOneDriveEnabled,
+				    (SELECT IF(COUNT(1)> 0, 1, 0) 
+				     FROM sat_cloud_storage_list sl 
+				    	  INNER JOIN sat_doc_source_dropbox db ON db.document_type = sl.code 
+				      AND sl.code = 'dropbox' AND is_active = 1
+				    WHERE db.user_id = :user_id) AS IsDropBoxEnabled,
+				    d.updated_on AS UpdatedOn, d.is_secured AS IsSecured,
+				    (SELECT COUNT(1) FROM ad_party p
+							INNER JOIN ad_document_status ds ON ds.ad_document_status_id = p.status_id
+					  WHERE p.ad_document_id = d.ad_document_id
+						AND ds.code = 'APPROVED') AS RecipientApprovedCount, d.workflow_type_id AS WorkflowTypeId,
+				   wt.workflow_code AS WorkflowCode, wt.workflow_name AS WorkflowName, d.document_guid AS DocumentGuid,
+				   IF (s.code = 'CAMPAIGNSTOPPED', IF(fd.ad_document_id IS NULL, 'Document Generation In Progress', s.name), s.name) AS StatusName,
+				   UPPER(MD5(d.ad_document_id)) AS DocumentSearchId, null AS Reason, d.expiration_date AS ExpirationDate,
+				   d.is_from_scratch_document AS IsFromScratchDocument,
+				   (SELECT COUNT(1)
+				      FROM ad_party p
+				     WHERE p.ad_document_id = d.ad_document_id
+				       AND p.is_aadhaar_esign = 1) AS AadhaarEsignCount
+	          FROM ad_document d
+	        	   INNER JOIN ad_party p ON p.ad_document_id = d.ad_document_id
+	        	   INNER JOIN ad_document_status s ON s.ad_document_status_id = d.status_id
+	        	   INNER JOIN ad_document_status ps ON ps.ad_document_status_id = p.status_id
+	        	   LEFT JOIN ad_document_floders_relations fr ON fr.user_id = :user_id
+	        	    LEFT JOIN user u ON p.user_id = u.user_id
+	        	   INNER JOIN ad_workflow_type wt ON wt.workflow_type_id = d.workflow_type_id
+	        	    LEFT JOIN (SELECT DISTINCT ad_document_id
+	        	                 FROM ad_final_document) as fd ON fd.ad_document_id = d.ad_document_id
+	         WHERE IF(p.is_owner = 0, p.status_id IN (SELECT ad_document_status_id 
+														FROM ad_document_status s 
+													   WHERE code NOT IN ('DRAFT')), p.status_id IS NOT NULL)
+		       AND d.status_id = IFNULL(:status_id, d.status_id)
+		       AND d.ad_document_id NOT IN (SELECT fr.document_id FROM ad_document_floders_relations fr WHERE fr.user_id = :user_id)
+		       AND IF (:current_user_email IS NOT NULL, p.email_address = :current_user_email AND s.code = 'SENT',
+		    	   IF (:email_address IS NULL,  $condition, p.email_address = :email_address AND p.is_owner = 0 AND s.code = 'APPROVED')
+		       AND IF (:status_code IS NULL, s.code = s.code, 
+		            IF (:status_code = 'WAITFOROTHERS', s.name = 'Sent' AND d.party_count > 1 AND p.user_id = :user_id AND ps.ad_document_status_id = 3 AND d.status_id = 2,
+		               IF (:status_code = 'ACTIONREQUIRED', s.name = 'Sent' AND d.party_count > 1 and p.is_owner = 1 AND ps.name = 'Sent',
+		                  IF (:status_code = 'TOSIGN',p.user_id = :user_id AND ps.ad_document_status_id = 2,
+		                	IF (:status_code = 'DRAFT', s.code = 'DRAFT' AND $sqlCondition,
+		                	  IF (:status_code = 'MYDOCUMENTS', p.user_id = :user_id AND p.is_owner = 1 AND s.code = 'APPROVED',
+		                		IF (:status_code = 'TOTALDOCUMENTS', p.user_id = :user_id AND p.is_owner = 1 AND s.code = 'APPROVED' OR p.email_address = :email AND p.is_owner = 0 AND s.code = 'APPROVED',
+		               s.code = IFNULL(:status_code, s.code)))))
+		           ))))
+		       AND (LOWER(d.title) LIKE CONCAT(IFNULL(IFNULL(:search_by_text, ''), LOWER(d.title)), '%')
+			    OR LOWER(d.description) LIKE CONCAT('%', LOWER(IF(:search_by_text='', d.description, :search_by_text)), '%')
+			    OR UPPER(MD5(d.ad_document_id)) LIKE CONCAT('%', LOWER(IF(:search_by_text='', UPPER(MD5(d.ad_document_id)), :search_by_text)), '%')
+			    OR LOWER(IF(:search_by_text='You', p.user_id = :user_id, 
+			       LOWER(u.first_name) LIKE CONCAT('%', LOWER(IF(:search_by_text='', u.first_name, :search_by_text)), '%')
+			    OR LOWER(u.last_name) LIKE CONCAT('%', LOWER(IF(:search_by_text='', u.last_name, :search_by_text)), '%'))))
+	      GROUP BY d.ad_document_id
+	      ORDER BY d.created_date desc
+		     LIMIT $offset, $criteria->PageSize";
+		          
+		$recordCountSql = "SELECT FOUND_ROWS() RecordCount";
+       //echo $criteria->StatusCode;die;
+		$params = (object)array(
+			'company_id' => $criteria->CompanyId,
+			'user_id' => $criteria->UserId,
+			'status_id'	=> isset($criteria->StatusId) ? $criteria->StatusId : null,
+			'status_code' => isset($criteria->StatusCode) ? $criteria->StatusCode : null,
+			'search_by_text' => isset($criteria->SearchByText) ? $criteria->SearchByText : null,
+			'email_address' => isset($criteria->EmailAddress) ? $criteria->EmailAddress : null,
+			'current_user_email' => isset($criteria->CurrentUserEmail) ? $criteria->CurrentUserEmail : null,
+			'email' => isset($criteria->Email) ? $criteria->Email : null
+		);
+		
+		return $this->getMultipleQueryResults([$dataSql, $recordCountSql], $params);
+    }
